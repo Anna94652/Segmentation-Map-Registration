@@ -33,15 +33,18 @@ class AffineSpatialTransformer(nn.Module):
         grid = torch.stack([x, y, z], dim = -1) # stacking coordinates for grid
         self.register_buffer("grid", grid.view(1, D, H, W, 3)) # register grid as buffer
 
-    def forward(self, x, affine_parameters):
+    def forward(self, x, affine):
         # input: 3D image volume with shape [B, C, D, H, W]
         # affine: predicted affine matrix per sample in batch, shape [B, 3, 4]
         B, C, D, H, W = x.shape # unpacking input shape
-        grid = self.grid.expand(B, -1, -1, -1, -1) # expanding grid to match batch size
-        ones = torch.ones(B, D, H, W, 1, device=x.device) # creating ones for affine
-        grid_h = torch.cat([])
-
-
+        grid = self.grid.expand(B, -1, -1, -1, -1)
+        ones = torch.ones(B, D, H, W, 1, device=x.device) # creating [1] for affine
+        grid_h = torch.cat([grid, ones], dim=-1) # appending to grid to become [x, y, z, 1]
+        grid_affine = torch.matmul(grid_h.view(B, -1, 4), affine.transpose(1, 2)) # applying transformation
+        grid_affine = grid_affine.view(B, D, H, W, 3) # turning back to 3D grid format
+        warped = F.grid_sample(x, grid_affine, mode = "bilinear", align_corners = False, padding_mode = "border") # applying grid sample to input
+        
+        return warped # returning warped image
 
 
 class UNet(nn.Module):
