@@ -1,7 +1,7 @@
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from model import UNet, SpatialTransformer, Affine
+from model import RegistrationModel
 from get_data import SegDataset
 from losses import dice_loss, smoothing_loss
 from tqdm import tqdm
@@ -13,7 +13,7 @@ torch.cuda.empty_cache()
 
 #logging
 wandb.init(project='seg-deformation')
-def train(model, stn, affine_net, dataloader, optimizer, device, epoch, max_epochs=50, dice_weight=1.0, smooth_weight=0.3):
+def train(model, dataloader, optimizer, device, epoch, max_epochs=50, dice_weight=1.0, smooth_weight=0.3):
     model.train()
     total_loss = 0
     dice_loss_total = 0
@@ -22,13 +22,8 @@ def train(model, stn, affine_net, dataloader, optimizer, device, epoch, max_epoc
     for moving, fixed in tqdm(dataloader, desc=f'Training for epoch: {epoch+1}/{max_epochs}', leave=False):
         moving = moving.to(device)
         fixed = fixed.to(device)
-        affine_matrix = affine_net(moving, fixed)
-        grid_affine = F.affine_grid(affine_matrix, moving.size(), align_corners=False)
-        moving_affine = F.grid_sample(moving, grid_affine, mode='nearest', padding_mode='border', align_corners=False)
-        input_ = torch.cat([moving_affine, fixed], dim=1)
-        deformation_field = model(input_)
         
-        warped_template = stn(moving, deformation_field)
+        warped_template, affine_matrix, deformation_field = model(moving, fixed)
 
         dice_loss_val = dice_loss(warped_template, fixed)
         smooth_loss_val = smoothing_loss(deformation_field)
@@ -65,16 +60,15 @@ def main():
     train_dataset = SegDataset(args.train_txt, args.template_path)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     print("Dataset loaded.")
-    affine_net = Affine(in_channels=8).to(device)
-    # U-Net to predict deformations, STN to warp the deformations on top of the template
-    model = UNet(in_channels=8, out_channels=3).to(device)
-    stn = SpatialTransformer().to(device)
+    from model import RegistrationModel
+    volume_size = train_dataset[0][0].shape[1:]  
+    model = RegistrationModel(volume_size).to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
 
     for epoch in range(args.epochs):
         avg_loss, avg_dice, avg_smooth = train(
-            model, stn, affine_net,train_loader, optimizer, device, epoch,args.epochs
+            model,train_loader, optimizer, device, epoch,args.epochs
         )
         print(f"Epoch {epoch + 1}/{args.epochs}, Loss: {avg_loss:.4f}, Dice Loss: {avg_dice:.4f}, Smoothing Loss: {avg_smooth:.4f}")
         
