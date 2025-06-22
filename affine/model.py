@@ -2,6 +2,48 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# adding a class to predict affine parameters
+class AffineParameterPredictor(nn.Module):
+    def __init__(self, in_channels=2):
+        super().__init__()
+        self.encoder = nn.Sequential(
+            nn.Conv3d(in_channels, 32, 3, padding = 1), # 2 input channels (fixed + moving template)
+            nn.ReLU(inplace=True), # activation function
+            nn.AdaptiveAvgPool3d(1) # global average pooling
+        )
+        self.fc = nn.Linear(32,12) # output 12 affine parameters (3 x 4 matrix)
+    
+    def forward(self, x): 
+        x = self.encoder(x)
+        x = x.view(x.size(0), -1) # flatten output
+        return x.view(-1, 3, 4) # reshape affine parameters to B, 3, 4 format
+
+# class for affine spatial transformer
+class AffineSpatialTransformer(nn.Module):
+    def __init__(self, size):
+        super().__init__()
+        D, H, W = size # dimensions of input volume
+        # creating grid for affine transformation
+        z, y, x = torch.meshgrid(
+            torch.linspace(-1, 1, D),
+            torch.linspace(-1, 1, H),
+            torch.linspace(-1, 1, W),
+            indexing = "ij"
+        )
+        grid = torch.stack([x, y, z], dim = -1) # stacking coordinates for grid
+        self.register_buffer("grid", grid.view(1, D, H, W, 3)) # register grid as buffer
+
+    def forward(self, x, affine_parameters):
+        # input: 3D image volume with shape [B, C, D, H, W]
+        # affine: predicted affine matrix per sample in batch, shape [B, 3, 4]
+        B, C, D, H, W = x.shape # unpacking input shape
+        grid = self.grid.expand(B, -1, -1, -1, -1) # expanding grid to match batch size
+        ones = torch.ones(B, D, H, W, 1, device=x.device) # creating ones for affine
+        grid_h = torch.cat([])
+
+
+
+
 class UNet(nn.Module):
     def __init__(self, in_channels, out_channels):
         super(UNet, self).__init__()
@@ -68,51 +110,52 @@ class UNet(nn.Module):
         up1 = self.up1(d2)
         d1 = self.dec1(torch.cat((up1, e1), dim=1))
 
-        # deformation_field = self.out_conv(d1)
-        deformation_field = self.out_conv(d1)*0.2 #multiplying to potentially reduce distortion, not entirely sure about the effect of this
+     
+        deformation_field = self.out_conv(d1)
         return deformation_field
 
 class SpatialTransformer(nn.Module):
-    def __init__(self):
-        super(SpatialTransformer, self).__init__()
-
-    def forward(self, moving, deformation):
+    """
+    A true dense STN for 3D one-hot maps, with an identity grid buffer
+    and nearest‐neighbor sampling for crisp labels.
+    """
+    def __init__(self, size, device='cpu'):
+        """
+        Args:
+            size: tuple of ints (D, H, W)
+            device: tensor device
+        """
+        super().__init__()
+        D, H, W = size
  
-        B, C, H, W, D = moving.shape
-        grid = F.affine_grid(torch.eye(3, 4).unsqueeze(0).repeat(B, 1, 1).to(moving.device),
-                             moving.size(), align_corners=False)
+        lin_z = torch.linspace(-1, 1, D, device=device)
+        lin_y = torch.linspace(-1, 1, H, device=device)
+        lin_x = torch.linspace(-1, 1, W, device=device)
+        zz, yy, xx = torch.meshgrid(lin_z, lin_y, lin_x, indexing='ij')
 
-        deformation = deformation.permute(0, 2, 3, 4, 1)  # (B, H, W, D, 3)
-        warped_grid = grid + deformation
+        id_grid = torch.stack((xx, yy, zz), dim=-1)
+        self.register_buffer('id_grid', id_grid.unsqueeze(0))
 
-        warped = F.grid_sample(moving, warped_grid, mode='bilinear', padding_mode='border', align_corners=False)
-        return warped
-import torch.nn as nn
-import torch.nn.functional as F
-
-class Affine(nn.Module):
-    def __init__(self, in_channels=8):
-        super(Affine, self).__init__()
-        self.conv = nn.Sequential(
-            nn.Conv3d(in_channels, 16, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(16),
-            nn.ReLU(inplace=True),
-            nn.MaxPool3d(2),
-            nn.Conv3d(16, 32, kernel_size=3, padding=1),
-            nn.InstanceNorm3d(32),
-            nn.ReLU(inplace=True),
-            nn.AdaptiveAvgPool3d(1)
+    def forward(self, moving, flow):
+        """
+        Args:
+            moving: (B, C, D, H, W) one‐hot template
+            flow:   (B, 3, D, H, W) displacement in normalized coords
+        Returns:
+            warped: (B, C, D, H, W) one‐hot warped template
+        """
+        B, C, D, H, W = moving.shape
+      
+        flow = flow.permute(0, 2, 3, 4, 1)
+   
+        grid = self.id_grid.expand(B, -1, -1, -1, -1)
+    
+        warped_grid = grid + flow
+      
+        warped = F.grid_sample(
+            moving, warped_grid,
+            mode='bilinear',
+            padding_mode='border',
+            align_corners=False
         )
-        self.fc = nn.Linear(32, 12)  
-        self.fc.weight.data.zero_()
-        self.fc.bias.data.copy_(torch.tensor([1, 0, 0, 0,
-                                               0, 1, 0, 0,
-                                               0, 0, 1, 0], dtype=torch.float))
-
-    def forward(self, moving, fixed):
-        x = torch.cat([moving, fixed], dim=1)
-        features = self.conv(x)
-        features = features.view(features.size(0), -1)
-        affine_params = self.fc(features)
-        affine_matrix = affine_params.view(-1, 3, 4)
-        return affine_matrix
+        return warped
