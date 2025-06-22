@@ -162,3 +162,23 @@ class SpatialTransformer(nn.Module):
             align_corners=False
         )
         return warped
+
+# chaining all components together
+class RegistrationModel(nn.Module):
+    def __init__(self, size):
+        super().__init__()
+        self.affine_predictor = AffineParameterPredictor()
+        self.affine_stn = AffineSpatialTransformer(size)
+        self.unet = UNet(in_channels=2, out_channels=3)
+        self.nonrigid_stn = SpatialTransformer(size)
+
+    def forward(self, source, target):
+        x_affine_input = torch.cat([source, target], dim=1)
+        affine_matrix = self.affine_predictor(x_affine_input) # predicting affine parameters
+        source_affine = self.affine_stn(source, affine_matrix) # applying affine trans. on source
+
+        x_unet_input = torch.cat([source_affine, target], dim=1)
+        deformation_field = self.unet(x_unet_input) # predicting deformation w Unet
+        warped_source = self.nonrigid_stn(source_affine, deformation_field) # applying non-rigid
+
+        return warped_source, affine_matrix, deformation_field
